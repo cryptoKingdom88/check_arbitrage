@@ -1,4 +1,4 @@
-import { ethers, BigNumber } from 'ethers';
+import { ethers } from 'ethers';
 
 const INFURA_API_KEY = 'ea0a5cbdb47b4dbfb799f3269d449904';
 const UNISWAP_POOL_ADDRESS = '0xE0554a476A092703abdB3Ef35c80e0D76d32939F';
@@ -20,14 +20,18 @@ interface SwapPoolInfo {
   exchangeType: 'uniswap' | 'sushiswap';
   token1: string;
   token2: string;
-  reserve1: number;
-  reserve2: number;
+  reserve1: bigint;
+  reserve2: bigint;
+}
+
+interface ArbitragePathItem {
+  targetToken: string;
+  swapPool: SwapPoolInfo;
 }
 
 interface ArbitragePathInfo {
   id: string;
-  startPoolInfo: SwapPoolInfo;
-  otherPoolsInfo: SwapPoolInfo[];
+  arbitPathInfo: ArbitragePathItem[];
 }
 
 // Maps for storing data
@@ -56,8 +60,8 @@ function updateReservesAndCalculateArbitrage(poolAddress: string, amount0: ether
   const poolInfo = swapPoolMap.get(poolAddress);
   if (poolInfo) {
     // Update reserves
-    poolInfo.reserve1 = ethers.BigNumber.from(amount0).toNumber();
-    poolInfo.reserve2 = ethers.BigNumber.from(amount1).toNumber();
+    poolInfo.reserve1 = BigInt(amount0.toString());
+    poolInfo.reserve2 = BigInt(amount1.toString());
 
     // Calculate arbitrage opportunities
     calculateArbitrageOpportunities(poolInfo);
@@ -65,9 +69,51 @@ function updateReservesAndCalculateArbitrage(poolAddress: string, amount0: ether
 }
 
 // Function to calculate arbitrage opportunities
-function calculateArbitrageOpportunities(poolInfo: SwapPoolInfo) {
-  // Implement arbitrage calculation logic here
-  console.log(`Calculating arbitrage opportunities for pool: ${poolInfo.id}`);
+async function calculateArbitrageOpportunities(poolInfo: SwapPoolInfo) {
+  const startAmount = ethers.parseEther('1'); // Start with 1 ETH
+  let currentAmount = startAmount;
+  const feePercent = 0.5; // Fee percentage
+  const feeMultiplier = 1 - feePercent / 100;
+
+  // Get all arbitrage paths that include the current pool
+  const arbitragePaths = arbitragePathMapping.get(poolInfo.id);
+  if (arbitragePaths) {
+    // Process each arbitrage path concurrently
+    await Promise.all(arbitragePaths.map(async (pathId) => {
+      const arbitragePath = arbitragePathMap.get(pathId);
+      if (arbitragePath) {
+        currentAmount = startAmount;
+
+        // Iterate over each pool in the arbitrage path
+        for (const pathItem of arbitragePath.arbitPathInfo) {
+          const pool = pathItem.swapPool;
+          const isToken1Target = pathItem.targetToken === pool.token1;
+          const reserveIn = isToken1Target ? pool.reserve2 : pool.reserve1;
+          const reserveOut = isToken1Target ? pool.reserve1 : pool.reserve2;
+
+          // Calculate output amount using the constant product formula with fee
+          const amountOut = getAmountOutWithFee(currentAmount, reserveIn, reserveOut, feeMultiplier);
+          currentAmount = amountOut;
+        }
+
+        // Calculate profit
+        const profit = currentAmount - startAmount;
+        if (profit > 0n) {
+          console.log(`Arbitrage opportunity detected in path ${pathId}! Profit: ${ethers.formatEther(profit.toString())} ETH`);
+        } else {
+          console.log(`No arbitrage opportunity detected in path ${pathId}.`);
+        }
+      }
+    }));
+  }
+}
+
+// Helper function to calculate output amount with fee
+function getAmountOutWithFee(amountIn: bigint, reserveIn: bigint, reserveOut: bigint, feeMultiplier: number): bigint {
+  const amountInWithFee = BigInt(Math.floor(Number(amountIn) * feeMultiplier));
+  const numerator = amountInWithFee * reserveOut;
+  const denominator = reserveIn * 1000n + amountInWithFee;
+  return numerator / denominator;
 }
 
 // Example usage
