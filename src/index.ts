@@ -4,14 +4,27 @@ import { open } from 'sqlite';
 
 const INFURA_API_KEY = 'ea0a5cbdb47b4dbfb799f3269d449904';
 
-// ABI for Uniswap V2 Pool
+// Define the ABI including the Sync event
 const UNISWAP_V2_POOL_ABI = [
-  "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"
-];
-
-// ABI for Sushiswap Pool
-const SUSHISWAP_POOL_ABI = [
-  "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint112",
+        "name": "reserve0",
+        "type": "uint112"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint112",
+        "name": "reserve1",
+        "type": "uint112"
+      }
+    ],
+    "name": "Sync",
+    "type": "event"
+  }
 ];
 
 // Define data structures
@@ -24,8 +37,8 @@ interface TokenInfo {
 
 interface LPInfo {
   address: string;
-  token1: string;
-  token2: string;
+  token1_address: string;
+  token2_address: string;
   reserve1: bigint;
   reserve2: bigint;
 }
@@ -97,20 +110,28 @@ function logDatabaseInfo() {
   console.log('LP to Route Mapping:', Array.from(lp2routeMapping.entries()));
 }
 
-const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
+// Function to subscribe to swap events in batches
+function subscribeToPoolsInBatches() {
+  const batchSize = 800;
 
-// Function to subscribe to swap events for all pools in lpMap
-function subscribeToAllPools() {
+  let i = 0;
+  let provider: ethers.WebSocketProvider;
   lpMap.forEach((lpInfo, address) => {
-    const abi = UNISWAP_V2_POOL_ABI;
-    console.log(address);
-    const contract = new ethers.Contract(address, abi, provider);
-    contract.on('Swap', (...args: any[]) => {
-      console.log(`Swap event detected on pool!`);
-      const contractAddress = contract.address.toString();
-      const [sender, amount0In, amount1In, amount0Out, amount1Out, to] = args as [string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, string];
-      const amount0 = BigInt(amount0Out.toString()) - BigInt(amount0In.toString());
-      const amount1 = BigInt(amount1Out.toString()) - BigInt(amount1In.toString());
+    if (i % batchSize === 0) {
+      provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
+    }
+    i++;
+    const contract = new ethers.Contract(address, UNISWAP_V2_POOL_ABI, provider);
+    contract.on('Sync', (...args: any[]) => {
+      const [reserve0, reserve1] = args as [ethers.BigNumberish, ethers.BigNumberish];
+      const contractAddress = address.toString();
+      
+      // Log the contract address and check if it exists in lpMap
+      const amount0 = BigInt(reserve0.toString());
+      const amount1 = BigInt(reserve1.toString());
+      const fromSymbol = tokenMap.get(lpInfo.token1_address)?.symbol;
+      const toSymbol = tokenMap.get(lpInfo.token2_address)?.symbol;
+      console.log(`Sync event detected on pool! ${fromSymbol} ${toSymbol} ${contractAddress} ${amount0} ${amount1}`);
       updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
     });
   });
@@ -147,12 +168,17 @@ async function calculateArbitrageOpportunities(poolInfo: LPInfo) {
         let pathDescription = 'WETH';
 
         // Iterate over each pool in the arbitrage path
+        let priceNotReady = false;
         for (const pathItem of routePath.routeInfo) {
           const lpPool = lpMap.get(pathItem.lp);
           if (lpPool) {
-            const isToken1Target = pathItem.target === lpPool.token1;
+            const isToken1Target = pathItem.target === lpPool.token1_address;
             const reserveIn = isToken1Target ? lpPool.reserve2 : lpPool.reserve1;
             const reserveOut = isToken1Target ? lpPool.reserve1 : lpPool.reserve2;
+
+            if (reserveIn === 0n || reserveOut === 0n) {
+              priceNotReady = true;
+            }
 
             // Retrieve the token symbol from the tokenMap
             const tokenInfo = tokenMap.get(pathItem.target);
@@ -172,7 +198,9 @@ async function calculateArbitrageOpportunities(poolInfo: LPInfo) {
         if (profit > 0n) {
           console.log(`Arbitrage opportunity detected! Path: ${pathDescription} Profit: ${ethers.formatEther(profit.toString())} ETH`);
         } else {
-          console.log(`No arbitrage opportunity detected in path ${pathDescription}.`);
+          if (!priceNotReady) {
+            console.log(`No arbitrage opportunity detected in path ${pathDescription}. Profit: ${ethers.formatEther(profit.toString())} ETH`);
+          }
         }
       }
     }));
@@ -181,23 +209,32 @@ async function calculateArbitrageOpportunities(poolInfo: LPInfo) {
 
 // Helper function to calculate output amount with fee
 function getAmountOutWithFee(amountIn: bigint, reserveIn: bigint, reserveOut: bigint, feeMultiplier: number): bigint {
+  if (reserveIn === 0n || reserveOut === 0n) {
+    return 0n;
+  }
   const amountInWithFee = BigInt(Math.floor(Number(amountIn) * feeMultiplier));
   const numerator = amountInWithFee * reserveOut;
   const denominator = reserveIn * 1000n + amountInWithFee;
+
+  if (denominator === 0n) {
+    //console.error('Error: Division by zero in getAmountOutWithFee');
+    return 0n; // or handle the error as needed
+  }
+
   return numerator / denominator;
 }
 
 console.log('Listening for Swap events...');
 
-// Call fetchData to initialize maps, log the data, and subscribe to all pools
+// Call fetchData to initialize maps, log the data, and subscribe to pools in batches
 fetchData().then(() => {
-  logDatabaseInfo();
-  subscribeToAllPools();
+  //logDatabaseInfo();
+  subscribeToPoolsInBatches();
 }).catch(console.error); 
 
 function subscribeToSwapEvents() {
   const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
-  const contract = new ethers.Contract("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc", SUSHISWAP_POOL_ABI, provider);
+  const contract = new ethers.Contract("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc", UNISWAP_V2_POOL_ABI, provider);
 
   contract.on('Swap', (sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick) => {
     console.log(`Swap event detected on pool! ${sender} ${recipient} ${amount0} ${amount1} ${sqrtPriceX96} ${liquidity} ${tick}`);
