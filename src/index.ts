@@ -4,14 +4,14 @@ import { open } from 'sqlite';
 
 const INFURA_API_KEY = 'ea0a5cbdb47b4dbfb799f3269d449904';
 
-// ABI for Uniswap V3 Pool
-const UNISWAP_POOL_ABI = [
-  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"
+// ABI for Uniswap V2 Pool
+const UNISWAP_V2_POOL_ABI = [
+  "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"
 ];
 
 // ABI for Sushiswap Pool
 const SUSHISWAP_POOL_ABI = [
-  "event Swap(address indexed sender, address indexed to, int256 amount0In, int256 amount1In, int256 amount0Out, int256 amount1Out)"
+  "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"
 ];
 
 // Define data structures
@@ -24,7 +24,6 @@ interface TokenInfo {
 
 interface LPInfo {
   address: string;
-  source: 'uniswap' | 'sushiswap';
   token1: string;
   token2: string;
   reserve1: bigint;
@@ -98,27 +97,21 @@ function logDatabaseInfo() {
   console.log('LP to Route Mapping:', Array.from(lp2routeMapping.entries()));
 }
 
-// Single global provider for both Uniswap and Sushiswap
 const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
 
 // Function to subscribe to swap events for all pools in lpMap
 function subscribeToAllPools() {
   lpMap.forEach((lpInfo, address) => {
-    const abi = lpInfo.source === 'uniswap' ? UNISWAP_POOL_ABI : SUSHISWAP_POOL_ABI;
-    console.log(address + " " + lpInfo.source);
+    const abi = UNISWAP_V2_POOL_ABI;
+    console.log(address);
     const contract = new ethers.Contract(address, abi, provider);
     contract.on('Swap', (...args: any[]) => {
-      console.log(`Swap event detected on ${lpInfo.source} pool!`);
+      console.log(`Swap event detected on pool!`);
       const contractAddress = contract.address.toString();
-      if (lpInfo.source === 'uniswap') {
-        const [sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick] = args as [string, string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, number];
-        updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
-      } else if (lpInfo.source === 'sushiswap') {
-        const [sender, to, amount0In, amount1In, amount0Out, amount1Out] = args as [string, string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish];
-        const amount0 = BigInt(amount0Out.toString()) - BigInt(amount0In.toString());
-        const amount1 = BigInt(amount1Out.toString()) - BigInt(amount1In.toString());
-        updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
-      }
+      const [sender, amount0In, amount1In, amount0Out, amount1Out, to] = args as [string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, string];
+      const amount0 = BigInt(amount0Out.toString()) - BigInt(amount0In.toString());
+      const amount1 = BigInt(amount1Out.toString()) - BigInt(amount1In.toString());
+      updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
     });
   });
 }
@@ -198,6 +191,17 @@ console.log('Listening for Swap events...');
 
 // Call fetchData to initialize maps, log the data, and subscribe to all pools
 fetchData().then(() => {
-  //logDatabaseInfo();
+  logDatabaseInfo();
   subscribeToAllPools();
 }).catch(console.error); 
+
+function subscribeToSwapEvents() {
+  const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
+  const contract = new ethers.Contract("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc", SUSHISWAP_POOL_ABI, provider);
+
+  contract.on('Swap', (sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick) => {
+    console.log(`Swap event detected on pool! ${sender} ${recipient} ${amount0} ${amount1} ${sqrtPriceX96} ${liquidity} ${tick}`);
+  });
+}
+
+//subscribeToSwapEvents();
