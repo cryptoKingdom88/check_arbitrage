@@ -98,33 +98,29 @@ function logDatabaseInfo() {
   console.log('LP to Route Mapping:', Array.from(lp2routeMapping.entries()));
 }
 
-// Call fetchData to initialize maps and log the data
-fetchData().then(logDatabaseInfo).catch(console.error);
+// Single global provider for both Uniswap and Sushiswap
+const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
 
-// Function to subscribe to swap events in batches
-function subscribeToSwapEvents(lpAddresses: string[], exchangeType: 'uniswap' | 'sushiswap') {
-  const batchSize = 1000;
-  for (let i = 0; i < lpAddresses.length; i += batchSize) {
-    const batch = lpAddresses.slice(i, i + batchSize);
-    batch.forEach((address) => {
-      const provider = new ethers.WebSocketProvider(`wss://mainnet.infura.io/ws/v3/${INFURA_API_KEY}`);
-      const abi = exchangeType === 'uniswap' ? UNISWAP_POOL_ABI : SUSHISWAP_POOL_ABI;
-      const contract = new ethers.Contract(address, abi, provider);
-
-      contract.on('Swap', (...args) => {
-        console.log(`Swap event detected on ${exchangeType} pool!`);
-        if (exchangeType === 'uniswap') {
-          const [sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick] = args;
-          updateReservesAndCalculateArbitrage(address, amount0, amount1);
-        } else if (exchangeType === 'sushiswap') {
-          const [sender, to, amount0In, amount1In, amount0Out, amount1Out] = args;
-          const amount0 = amount0Out - amount0In;
-          const amount1 = amount1Out - amount1In;
-          updateReservesAndCalculateArbitrage(address, amount0, amount1);
-        }
-      });
+// Function to subscribe to swap events for all pools in lpMap
+function subscribeToAllPools() {
+  lpMap.forEach((lpInfo, address) => {
+    const abi = lpInfo.source === 'uniswap' ? UNISWAP_POOL_ABI : SUSHISWAP_POOL_ABI;
+    console.log(address + " " + lpInfo.source);
+    const contract = new ethers.Contract(address, abi, provider);
+    contract.on('Swap', (...args: any[]) => {
+      console.log(`Swap event detected on ${lpInfo.source} pool!`);
+      const contractAddress = contract.address.toString();
+      if (lpInfo.source === 'uniswap') {
+        const [sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick] = args as [string, string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, number];
+        updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
+      } else if (lpInfo.source === 'sushiswap') {
+        const [sender, to, amount0In, amount1In, amount0Out, amount1Out] = args as [string, string, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish, ethers.BigNumberish];
+        const amount0 = BigInt(amount0Out.toString()) - BigInt(amount0In.toString());
+        const amount1 = BigInt(amount1Out.toString()) - BigInt(amount1In.toString());
+        updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
+      }
     });
-  }
+  });
 }
 
 // Function to update reserves and calculate arbitrage opportunities
@@ -198,10 +194,10 @@ function getAmountOutWithFee(amountIn: bigint, reserveIn: bigint, reserveOut: bi
   return numerator / denominator;
 }
 
-// Example usage
-const uniswapPools = ['0x4e665157291DBcb25152ebB01061E4012F58aDd2'];
-const sushiswapPools = ['0xE0554a476A092703abdB3Ef35c80e0D76d32939F'];
-subscribeToSwapEvents(uniswapPools, 'uniswap');
-subscribeToSwapEvents(sushiswapPools, 'sushiswap');
+console.log('Listening for Swap events...');
 
-console.log('Listening for Swap events...'); 
+// Call fetchData to initialize maps, log the data, and subscribe to all pools
+fetchData().then(() => {
+  //logDatabaseInfo();
+  subscribeToAllPools();
+}).catch(console.error); 
