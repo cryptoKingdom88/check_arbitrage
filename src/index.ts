@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import fs from 'fs';
 
 const INFURA_API_KEY = 'ea0a5cbdb47b4dbfb799f3269d449904';
 
@@ -81,6 +82,15 @@ const lpMap = new Map<string, LPInfo>();
 const routeMap = new Map<string, RouteInfo>();
 const lp2routeMapping = new Map<string, string[]>();
 
+// Create a write stream for logging
+const logStream = fs.createWriteStream('arbitrage.log', { flags: 'a' });
+
+// Helper function to log messages to both console and file
+function logMessage(message: string) {
+  console.log(message);
+  logStream.write(message + '\n');
+}
+
 // Open the SQLite database
 async function openDatabase() {
   return open({
@@ -124,14 +134,6 @@ async function fetchData() {
   await db.close();
 }
 
-// Log the loaded database information
-function logDatabaseInfo() {
-  console.log('TokenMap:', Array.from(tokenMap.entries()));
-  console.log('LPMap:', Array.from(lpMap.entries()));
-  console.log('RouteMap:', Array.from(routeMap.entries()));
-  console.log('LP to Route Mapping:', Array.from(lp2routeMapping.entries()));
-}
-
 // Function to subscribe to swap events in batches
 function subscribeToPoolsInBatches() {
   const batchSize = 800;
@@ -153,7 +155,7 @@ function subscribeToPoolsInBatches() {
       const amount1 = BigInt(reserve1.toString());
       const fromSymbol = tokenMap.get(lpInfo.token1_address)?.symbol;
       const toSymbol = tokenMap.get(lpInfo.token2_address)?.symbol;
-      console.log(`Sync event detected on pool! ${fromSymbol} ${toSymbol} ${contractAddress} ${amount0} ${amount1}`);
+      logMessage(`Pool updated! ${fromSymbol} ${toSymbol} ${contractAddress} ${amount0} ${amount1}`);
       updateReservesAndCalculateArbitrage(contractAddress, amount0, amount1);
     });
   });
@@ -195,8 +197,8 @@ async function calculateArbitrageOpportunities(poolInfo: LPInfo) {
           const lpPool = lpMap.get(pathItem.lp);
           if (lpPool) {
             const isToken1Target = pathItem.target === lpPool.token1_address;
-            const tokenIn = isToken1Target ? lpPool.token2_address : lpPool.token1_address;
-            const tokenOut = isToken1Target ? lpPool.token1_address : lpPool.token2_address;
+            const tokenIn = isToken1Target ? lpPool.token2_address.toLowerCase() : lpPool.token1_address.toLowerCase();
+            const tokenOut = isToken1Target ? lpPool.token1_address.toLowerCase() : lpPool.token2_address.toLowerCase();
             const reserveIn = isToken1Target ? lpPool.reserve2 : lpPool.reserve1;
             const reserveOut = isToken1Target ? lpPool.reserve1 : lpPool.reserve2;
 
@@ -227,8 +229,8 @@ async function calculateArbitrageOpportunities(poolInfo: LPInfo) {
         const profit = currentAmount - startAmount;
         if (profit > 0n) {
           const adjustedProfit = Number(profit) / (10 ** 18); // Assuming profit is in ETH
-          console.log(`Arbitrage opportunity detected! Path: ${pathDescription} Profit: ${adjustedProfit.toFixed(18)} ETH`);
-          console.log(`Calculation steps: ${logDescription}`);
+          logMessage(`Arbitrage opportunity detected! Path: ${pathDescription} Profit: ${adjustedProfit.toFixed(18)} ETH`);
+          logMessage(`Calculation steps: ${logDescription}`);
         } else {
           //console.log(`No arbitrage opportunity detected in path ${pathDescription}.`);
         }
@@ -289,7 +291,7 @@ async function fetchInitialPoolReserves() {
         if (lpInfo) {
           lpInfo.reserve1 = BigInt(reserve0.toString());
           lpInfo.reserve2 = BigInt(reserve1.toString());
-          console.log(`Initial reserves for ${address}: ${reserve0.toString()}, ${reserve1.toString()}`);
+          logMessage(`Initial reserves for ${address}: ${reserve0.toString()}, ${reserve1.toString()}`);
         }
       }
     } catch (error) {
@@ -299,6 +301,7 @@ async function fetchInitialPoolReserves() {
 }
 
 console.log('Listening for Swap events...');
+logStream.write('Listening for Swap events...\n');
 
 // Call fetchData to initialize maps, fetch initial reserves, and subscribe to pools in batches
 fetchData().then(() => {
